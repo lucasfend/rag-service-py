@@ -11,11 +11,13 @@ class TextProcessor:
     """
     
     def __init__(self):
-        # Palavras de parada em português (básicas)
+        # Palavras de parada em português mais completas
         self.stop_words = {
             'a', 'ao', 'aos', 'as', 'da', 'das', 'de', 'do', 'dos', 'e', 'em', 'é', 'na', 'nas', 'no', 'nos', 'o', 'os', 
             'para', 'por', 'que', 'se', 'uma', 'um', 'uns', 'umas', 'com', 'como', 'mas', 'ou', 'quando', 'onde', 'qual', 
-            'quais', 'sobre', 'todo', 'toda', 'todos', 'todas', 'ser', 'ter', 'estar', 'fazer', 'ir', 'vir', 'ver', 'dar'
+            'quais', 'sobre', 'todo', 'toda', 'todos', 'todas', 'ser', 'ter', 'estar', 'fazer', 'ir', 'vir', 'ver', 'dar',
+            'fale', 'falar', 'me', 'mim', 'você', 'voce', 'pode', 'poderia', 'seria', 'esta', 'isso', 'aquilo',
+            'mais', 'menos', 'muito', 'pouco', 'bem', 'mal', 'ja', 'ainda', 'sempre', 'nunca', 'talvez', 'quem'
         }
         
         logger.info("TextProcessor inicializado")
@@ -28,7 +30,7 @@ class TextProcessor:
             return ""
         
         # Normalizar unicode
-        text = unicodedata.normalize('NFKD', text)
+        text = unicodedata.normalize('NFKD', text).encode('ASCII', 'ignore').decode('utf-8')
         
         # Remover caracteres especiais mantendo acentos
         text = re.sub(r'[^\w\s\-.,!?;:()\[\]{}""''áéíóúâêîôûãõàèìòùäëïöüç]', ' ', text)
@@ -41,9 +43,9 @@ class TextProcessor:
         
         return text
     
-    def extract_keywords(self, text: str, max_keywords: int = 10) -> List[str]:
+    def extract_keywords(self, text: str, max_keywords: int = 5) -> List[str]:
         """
-        Extrai palavras-chave do texto
+        Extrai palavras-chave do texto com filtros mais inteligentes
         """
         if not text:
             return []
@@ -54,10 +56,13 @@ class TextProcessor:
         # Dividir em palavras
         words = clean_text.split()
         
-        # Filtrar palavras curtas e stop words
+        # Filtrar palavras curtas, stop words e palavras muito comuns
         keywords = []
         for word in words:
-            if len(word) > 2 and word not in self.stop_words:
+            if (len(word) > 3 and 
+                word not in self.stop_words and 
+                not word.isdigit() and
+                word.isalpha()):  # Apenas palavras com letras
                 keywords.append(word)
         
         # Contar frequência
@@ -70,6 +75,33 @@ class TextProcessor:
         
         # Retornar top keywords
         return [word for word, freq in sorted_words[:max_keywords]]
+    
+    def extract_academic_terms(self, text: str) -> List[str]:
+        """
+        Extrai termos acadêmicos específicos do texto
+        """
+        if not text:
+            return []
+        
+        # Padrões para termos acadêmicos
+        academic_patterns = [
+            r'\b[A-Z][a-zA-Z\s]+(?:de|da|do|dos|das)\s+[A-Z][a-zA-Z]+\b',  # Nomes de disciplinas
+            r'\b(?:fundamentos|introducao|algoritmos|programacao|calculo|estatistica|fisica|quimica|biologia|matematica|historia|geografia|filosofia|sociologia|psicologia|engenharia|medicina|direito|administracao|economia)\b',
+            r'\b[A-Z]{2,}\b',  # Siglas
+        ]
+        
+        terms = []
+        text_lower = text.lower()
+        
+        for pattern in academic_patterns:
+            matches = re.findall(pattern, text, re.IGNORECASE)
+            terms.extend(matches)
+        
+        # Remover duplicatas e filtrar
+        unique_terms = list(set(terms))
+        filtered_terms = [term.strip() for term in unique_terms if len(term.strip()) > 3]
+        
+        return filtered_terms[:5]  # Máximo 5 termos
     
     def preprocess_query(self, query: str) -> str:
         """

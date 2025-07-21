@@ -6,6 +6,10 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 from dotenv import load_dotenv
+from keybert import KeyBERT
+from sentence_transformers import SentenceTransformer
+from text_processor import TextProcessor
+import re
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -13,8 +17,15 @@ logger = logging.getLogger(__name__)
 class DatabaseService:
     """
     Serviço para interagir com o MongoDB e realizar buscas semânticas
-    """
-    
+    """ 
+    model = SentenceTransformer('all-MiniLM-L6-v2')
+    kw_model = KeyBERT(model)
+
+    @staticmethod
+    def extract_keywords(text: str, top_n: int = 3) -> list:
+        keywords = DatabaseService.kw_model.extract_keywords(text, keyphrase_ngram_range=(1, 2), stop_words='english', top_n=top_n)
+        return [kw[0] for kw in keywords]
+
     def __init__(self):
         # Configurações do MongoDB
         self.connection_string = os.getenv('MONGODB_URI')
@@ -32,7 +43,7 @@ class DatabaseService:
         # Inicializar TF-IDF para busca semântica
         self.vectorizer = TfidfVectorizer(
             max_features=5000,
-            stop_words=None,  # Para português, você pode adicionar uma lista de stop words
+            stop_words=None,
             ngram_range=(1, 2),
             min_df=1,
             max_df=0.95
@@ -44,62 +55,74 @@ class DatabaseService:
         
         logger.info("DatabaseService inicializado com sucesso")
     
-    def search_documents(self, query: str, filters: Dict[str, Any] = None, limit: int = 5) -> List[Dict]:
-        """
-        Busca documentos relevantes usando busca textual e filtros
-        
-        Args:
-            query: Pergunta/consulta do usuário
-            filters: Filtros para subject, tutor, className
-            limit: Número máximo de resultados
-            
-        Returns:
-            Lista de documentos relevantes ordenados por relevância
-        """
+    def search_documents(self, query: str, filters: dict = None, limit: int = 5) -> list:
         try:
-            # 1. Construir filtros do MongoDB
             mongo_filters = {}
-            
-            if filters:
-                for key, value in filters.items():
-                    if value and value.strip():
-                        # Busca case-insensitive e parcial
-                        mongo_filters[key] = {"$regex": value.strip(), "$options": "i"}
-            
-            # 2. Buscar documentos no MongoDB
-            logger.info(f"Aplicando filtros: {mongo_filters}")
-            
-            # Busca inicial com filtros
+
+            # Usar busca $text para aproveitamento do índice textual
+            if query and query.strip():
+                mongo_filters = {"$text": {"$search": query}}
+
+            print(f"[DEBUG] Filtros utilizados: {mongo_filters}")
+
             cursor = self.collection.find(
                 mongo_filters,
                 {
                     'subject': 1,
-                    'tutor': 1,
                     'className': 1,
-                    'document': 1,
-                    'uploadedBy': 1
+                    'tutor': 1,
+                    'document': 1
+#                    'score': {'$meta': "textScore"}  # opcional para ordenar por relevância
                 }
-            ).limit(limit * 3)  # Buscar mais para ter opções para ranking
-            
+            ).limit(limit * 3)
+
             documents = list(cursor)
-            
+            print(f"[DEBUG] Documentos retornados da base: {len(documents)}")
+
+            # Ordenar por score do texto se disponível
+            if documents and 'score' in documents[0]:
+                documents.sort(key=lambda d: d.get('score', 0), reverse=True)
+
+            # Se nenhum documento foi encontrado, usar fallback simples por substring
+            if not documents and query:
+                print("[DEBUG] Fallback: busca por substring simples")
+                query_lower = query.lower()
+                substring_conditions = [
+                    {"subject": {"$regex": query_lower, "$options": "i"}},
+                    {"tutor": {"$regex": query_lower, "$options": "i"}},
+                    {"className": {"$regex": query_lower, "$options": "i"}},
+                    {"document": {"$regex": query_lower, "$options": "i"}}
+                ]
+                mongo_filters = {"$or": substring_conditions}
+
+                cursor = self.collection.find(
+                    mongo_filters,
+                    {
+                        'subject': 1,
+                        'className': 1,
+                        'tutor': 1,
+                        'document': 1
+                    }
+                ).limit(limit * 3)
+
+                documents = list(cursor)
+                print(f"[DEBUG] Documentos encontrados com fallback: {len(documents)}")
+
             if not documents:
-                logger.warning("Nenhum documento encontrado com os filtros aplicados")
                 return []
-            
-            # 3. Aplicar busca semântica se temos documentos
+
             if len(documents) > 1:
                 ranked_docs = self._rank_documents_by_similarity(query, documents)
                 return ranked_docs[:limit]
             else:
-                # Se só tem um documento, retornar com score 1.0
                 documents[0]['relevance_score'] = 1.0
                 return documents
-            
+
         except Exception as e:
             logger.error(f"Erro na busca de documentos: {str(e)}")
             raise
-    
+
+
     def _rank_documents_by_similarity(self, query: str, documents: List[Dict]) -> List[Dict]:
         """
         Ranqueia documentos por similaridade semântica usando TF-IDF
@@ -127,12 +150,16 @@ class DatabaseService:
             # Adicionar scores aos documentos
             for i, doc in enumerate(documents):
                 doc['relevance_score'] = float(similarities[i])
-            
+           
+            print("Documentos encontrados:", len(documents))
+            for doc in documents:
+                print("DOC:", doc)
+
             # Ordenar por relevância
             ranked_docs = sorted(documents, key=lambda x: x['relevance_score'], reverse=True)
             
-            # Filtrar documentos com score muito baixo
-            min_score = 0.1
+            # Filtrar documentos com score muito baixo (mais permissivo)
+            min_score = 0.0
             filtered_docs = [doc for doc in ranked_docs if doc['relevance_score'] >= min_score]
             
             logger.info(f"Documentos ranqueados: {len(filtered_docs)} de {len(documents)}")
